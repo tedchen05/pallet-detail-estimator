@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller 打包產物
+build/
+dist/
+*.spec
+*.exe
+
+# 資料輸出
+*.csv
+
+# Excel 開啟時產生的暫存檔
+~$*.xlsx
+
+# 編輯器
+.vs/
+.vscode/settings.json
+
+# 個人筆記
+開發筆記.md

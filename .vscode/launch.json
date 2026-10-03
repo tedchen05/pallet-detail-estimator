@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "執行棧板明細估算系統",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/棧板明細估算系統v3.0.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
+    ]
+}
