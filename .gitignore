@@ -16,6 +16,9 @@ dist/
 # Excel 開啟時產生的暫存檔
 ~$*.xlsx
 
+# 記住上次選擇的檔案(各電腦路徑不同)
+pallet_settings.json
+
 # 編輯器
 .vs/
 .vscode/settings.json
