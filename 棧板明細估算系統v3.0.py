@@ -2,168 +2,170 @@
 """
 Created on Thu Feb 20 05:26:10 2025
 
-@author: user
+@author: 陳皓均
+
+依包材規則把出貨件數拆成棧板明細，寫入輸出 Excel 的工作表2
 """
-import pandas as pd
+import os
 import tkinter as tk
-from tkinter import filedialog
 from datetime import datetime
-import os  
+from tkinter import filedialog
 
-def browse_file1():
-    file_path = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx;*.xls")])
-    if file_path:
-        file1_entry.delete(0, tk.END)
-        file1_entry.insert(0, file_path)
+import pandas as pd
 
-def browse_file2():
-    file_path = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx;*.xls")])
-    if file_path:
-        file2_entry.delete(0, tk.END)
-        file2_entry.insert(0, file_path)
+RULE_COLUMNS = ["包材", "分裝", "包裝", "單一包裝"]
+ITEM_COLUMNS = ["物料", "批次", "件數"]
+OUTPUT_COLUMNS = ["品號", "批號", "數量", "包材"]
+OUTPUT_SHEET = "工作表2"
+CODE_LENGTH = 5  # 物料代碼取最後幾碼比對包材
 
-def browse_package():
-    file_path = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx;*.xls")])
-    if file_path:
-        package_entry.delete(0, tk.END)
-        package_entry.insert(0, file_path)
 
-def finish():
-    package_file = package_entry.get().strip()
-    
-    if not os.path.exists(package_file):
-        result_label.config(text=f" {os.path.basename(package_file)} 條件規則的檔案不存在，請檢查檔名", fg="red")
-        return
+# 處理過程中可預期的錯誤，訊息直接顯示在介面上
+class PalletError(Exception):
+    pass
 
+
+# 讀取 Excel 並確認必要欄位都存在
+def read_excel_checked(path, columns, label, **kwargs):
+    name = os.path.basename(path)
+    if not os.path.exists(path):
+        raise PalletError(f"{name} {label}的檔案不存在，請檢查檔名")
     try:
-        rules_df = pd.read_excel(package_file)  # 讀取選擇的包材檔案
-    except:
-        result_label.config(text=f"{os.path.basename(package_file)} 條件規則的檔案失敗，請檢查檔案格式", fg="red")
-        return
-    
-    file1_name = file1_entry.get().strip()
-    
-    if not os.path.exists(file1_name):
-        result_label.config(text=f"{os.path.basename(file1_name)} 需要整合的檔案不存在，請檢查檔名", fg="red")
-        return
+        df = pd.read_excel(path, engine="openpyxl", **kwargs)
+    except Exception:
+        raise PalletError(f"{name} {label}的檔案讀取失敗，請檢查檔案格式")
 
-    try:
-        df = pd.read_excel(file1_name, engine="openpyxl", dtype={"批次": str})
-        df["批次"] = df["批次"].fillna("")
-        df_unique = df.drop_duplicates(subset=["物料", "批次"], keep="first").drop(columns=["件數"])
-        sum_df = df.groupby(["物料", "批次"], as_index=False)["件數"].sum()
-        final_df = pd.merge(df_unique, sum_df, on=["物料", "批次"], how="left")
-        print(df)
-        print(df_unique)
-        print(sum_df)
-        print(final_df)
-    except:
-        result_label.config(text=f" {os.path.basename(file1_name)} 需要整合的檔案失敗", fg="red")
-        return
-    
+    missing = [col for col in columns if col not in df.columns]
+    if missing:
+        raise PalletError(f"{name} 缺少欄位：{'、'.join(missing)}，請檢查第一列名稱")
+    return df
+
+
+# 同一物料、批次的件數加總，保留第一次出現的順序
+def merge_items(df):
+    df["批次"] = df["批次"].fillna("")
+    return df.groupby(["物料", "批次"], sort=False, as_index=False)["件數"].sum()
+
+
+# 依物料代碼最後幾碼找出對應的包材規則，查無回傳 None
+def find_rule(rules_df, item_code):
+    tail = item_code[-CODE_LENGTH:]
+    codes = rules_df["包材"].astype(str)
+    matched = rules_df[codes.apply(lambda code: code in tail)]
+    if matched.empty:
+        return None
+    return matched.iloc[0]
+
+
+# 把每個品項依分裝數量拆成多筆明細
+def split_items(items_df, rules_df, file_name):
     result = []
-    
-    for i in range(len(final_df)):
+    rows = items_df[ITEM_COLUMNS].itertuples(index=False)
+    for item_code, batch, qty in rows:
+        if not isinstance(item_code, str):
+            raise PalletError(f"{file_name} 物料欄位有空白或非文字，請檢查物料欄位")
+
+        rule = find_rule(rules_df, item_code)
+        if rule is None:
+            result.append([item_code, batch, qty, ""])  # 查無規則仍輸出，包材留空
+            continue
+
         try:
-            item_code = final_df["物料"][i]
-            batch = final_df["批次"][i]
-            qty = final_df["件數"][i]
-        except:
-            result_label.config(text=f"{os.path.basename(file1_name)} 條件規則有錯誤，請檢查第一列名稱", fg="red")
-            return
-    
-        # 取得倒數第二個字母
-        try:
-            second_last_char = item_code[-5:]  # 取最後 5 個字元
-        except:
-            result_label.config(text=f"{os.path.basename(file1_name)} 條件規則有錯誤，請檢查物料欄位", fg="red")
-            return
-    
-        # 查詢對應的包裝規則
-        try:
-            rule_row = rules_df[rules_df["包材"].astype(str).apply(lambda x: x in second_last_char)]
-            if not rule_row.empty:
-                divisor = rule_row.iloc[0]["分裝"]
-                packaging = rule_row.iloc[0]["包裝"]
-                single_packaging = rule_row.iloc[0]["單一包裝"]
-            else:
-                result.append([item_code, batch, qty, ""])  
-                continue
-        except:
-            result_label.config(text=f"{os.path.basename(package_file)} 欄位失敗，請確認 Excel 欄位名稱", fg="red")
-            return
-    
-        # 計算商數與餘數
-        try:
-            quotient = int(qty // divisor)  # 確保 quotient 是 int
-            remainder = int(qty % divisor)  # 確保 remainder 是 int
-        except:
-            result_label.config(text=f"{os.path.basename(file1_name)} 條件規則有錯誤，請檢查件數欄位", fg="red")
-            return
-    
-        # 先寫入完整商數的資料
-        for j in range(quotient):
-            result.append([item_code, batch, divisor, packaging])
-    
-        # 處理餘數
+            quotient = int(qty // rule["分裝"])
+            remainder = int(qty % rule["分裝"])
+        except (TypeError, ValueError, ZeroDivisionError):
+            raise PalletError(f"{file_name} 件數或分裝有誤，請檢查件數欄位")
+
+        result.extend([[item_code, batch, rule["分裝"], rule["包裝"]]] * quotient)
         if remainder > 1:
-            result.append([item_code, batch, remainder, packaging])  # 將餘數資料直接加到 result 裡
+            result.append([item_code, batch, remainder, rule["包裝"]])
         elif remainder == 1:
-            result.append([item_code, batch, remainder, single_packaging])  # 如果餘數是 1，使用單一包裝
-    
-    # 轉換成 DataFrame，寫回 Excel
-    output_df = pd.DataFrame(result, columns=["品號", "批號", "數量", "包材"])
-    file_path2 = file2_entry.get().strip()
-    
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            result.append([item_code, batch, remainder, rule["單一包裝"]])
+
+    return pd.DataFrame(result, columns=OUTPUT_COLUMNS)
+
+
+# 把明細寫入輸出檔的工作表2，不影響其他工作表
+def write_output(output_df, path):
+    name = os.path.basename(path)
+    if not os.path.exists(path):
+        raise PalletError(f"{name} 輸出結果的檔案不存在，請檢查檔名")
     try:
-        with pd.ExcelWriter(file_path2, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-            output_df.to_excel(writer, sheet_name="工作表2", index=False)
-        result_label.config(text=f"處理完成，已生成棧板明細 {now}", fg="green")  
+        with pd.ExcelWriter(path, engine="openpyxl", mode="a",
+                            if_sheet_exists="overlay") as writer:
+            output_df.to_excel(writer, sheet_name=OUTPUT_SHEET, index=False)
     except PermissionError:
-        result_label.config(text=f"{os.path.basename(file_path2)} 輸出結果的檔案被占用，請先關閉檔案再試", fg="red")
-    except:
-        result_label.config(text=f" {os.path.basename(file_path2)} 輸出結果的檔案有錯誤，請檢查檔案是否存在", fg="red")
+        raise PalletError(f"{name} 輸出結果的檔案被占用，請先關閉檔案再試")
+    except Exception:
+        raise PalletError(f"{name} 輸出結果的檔案寫入失敗，請檢查檔案格式")
 
-pallet = tk.Tk()
-pallet.geometry("350x200")
-pallet.resizable(False, False) 
-pallet.title("棧板明細估算系統")
 
-# 包材檔案
-package_label = tk.Label(pallet, text="請選擇條件規則的 Excel 檔案：")
-package_entry = tk.Entry(pallet, width=15)
-package_button = tk.Button(pallet, text="選擇", command=browse_package)
+# 從讀檔、拆分到寫檔的完整流程
+def build_pallet(rule_path, item_path, output_path):
+    rules_df = read_excel_checked(rule_path, RULE_COLUMNS, "條件規則")
+    items_df = read_excel_checked(item_path, ITEM_COLUMNS, "需要整合",
+                                  dtype={"批次": str})
+    merged_df = merge_items(items_df)
+    output_df = split_items(merged_df, rules_df, os.path.basename(item_path))
+    write_output(output_df, output_path)
 
-# 讀取 Excel 檔案
-file1_label = tk.Label(pallet, text="請選擇需要整合的 Excel 檔案：")
-file1_entry = tk.Entry(pallet, width=15)
-file1_button = tk.Button(pallet, text="選擇", command=browse_file1)
 
-# 寫入 Excel 檔案
-file2_label = tk.Label(pallet, text="請選擇輸出結果的 Excel 檔案：")
-file2_entry = tk.Entry(pallet, width=15)
-file2_button = tk.Button(pallet, text="選擇", command=browse_file2)
+# 棧板明細估算系統的視窗介面
+class PalletApp:
 
-confirm = tk.Button(pallet, text="提交", command=finish)
-result_label = tk.Label(pallet, text="")
+    # 建立視窗與三組檔案選擇欄位
+    def __init__(self, root):
+        self.root = root
+        root.geometry("350x200")
+        root.resizable(False, False)
+        root.title("棧板明細估算系統")
 
-# 佈局設定
-package_label.grid(row=0, column=0, padx=5, pady=5, sticky="e")
-package_entry.grid(row=0, column=1, padx=5, pady=5)
-package_button.grid(row=0, column=2, padx=5, pady=5)
+        self.rule_entry = self.add_file_row(0, "請選擇條件規則的 Excel 檔案：")
+        self.item_entry = self.add_file_row(1, "請選擇需要整合的 Excel 檔案：")
+        self.output_entry = self.add_file_row(2, "請選擇輸出結果的 Excel 檔案：")
 
-file1_label.grid(row=1, column=0, padx=5, pady=5, sticky="e")
-file1_entry.grid(row=1, column=1, padx=5, pady=5)
-file1_button.grid(row=1, column=2, padx=5, pady=5)
+        tk.Button(root, text="提交", command=self.submit).grid(
+            row=3, column=0, columnspan=3, pady=10)
+        self.result_label = tk.Label(root, text="")
+        self.result_label.grid(row=4, column=0, columnspan=3, pady=5)
 
-file2_label.grid(row=2, column=0, padx=5, pady=5, sticky="e")
-file2_entry.grid(row=2, column=1, padx=5, pady=5)
-file2_button.grid(row=2, column=2, padx=5, pady=5)
+        root.bind("<Return>", lambda event: self.submit())
 
-confirm.grid(row=3, column=0, columnspan=3, pady=10)
-result_label.grid(row=4, column=0, columnspan=3, pady=5)  
+    # 新增一列「說明＋輸入框＋選擇按鈕」，回傳輸入框
+    def add_file_row(self, row, text):
+        tk.Label(self.root, text=text).grid(
+            row=row, column=0, padx=5, pady=5, sticky="e")
+        entry = tk.Entry(self.root, width=15)
+        entry.grid(row=row, column=1, padx=5, pady=5)
+        tk.Button(self.root, text="選擇",
+                  command=lambda: self.browse(entry)).grid(
+            row=row, column=2, padx=5, pady=5)
+        return entry
 
-pallet.bind("<Return>", lambda event: finish())
+    # 開啟檔案選擇視窗，把路徑填入輸入框
+    def browse(self, entry):
+        path = filedialog.askopenfilename(
+            filetypes=[("Excel Files", "*.xlsx;*.xls")])
+        if path:
+            entry.delete(0, tk.END)
+            entry.insert(0, path)
 
-pallet.mainloop()
+    # 執行估算並在下方顯示結果
+    def submit(self):
+        try:
+            build_pallet(self.rule_entry.get().strip(),
+                         self.item_entry.get().strip(),
+                         self.output_entry.get().strip())
+        except PalletError as error:
+            self.result_label.config(text=str(error), fg="red")
+            return
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.result_label.config(text=f"處理完成，已生成棧板明細 {now}",
+                                 fg="green")
+
+
+if __name__ == "__main__":
+    window = tk.Tk()
+    PalletApp(window)
+    window.mainloop()
