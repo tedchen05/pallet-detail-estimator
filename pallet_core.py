@@ -19,13 +19,14 @@ from openpyxl import load_workbook
 RULE_COLUMNS = ["包材", "分裝", "包裝", "單一包裝"]
 ITEM_COLUMNS = ["物料", "批次", "件數"]
 OUTPUT_COLUMNS = ["品號", "批號", "數量", "包材"]
-KIND_COLUMN = "類型"  # 明細類型，只用於介面標色
+KIND_COLUMN = "類型"  # 只用於介面標色
 FULL, REMAINDER, UNMATCHED = "滿分裝", "餘數", "查無規則"
 OUTPUT_SHEET = "工作表2"
 CODE_LENGTH = 5  # 物料代碼取最後幾碼比對包材
+MAX_PROBLEMS = 3  # 錯誤訊息最多列出幾處
 
-DATE_FORMAT = "%Y%m%d"  # 新檔檔名的日期格式
-DATE_SUFFIX = re.compile(r"_\d{8}(_\d+)?$")  # 檔名結尾已有的日期與流水號
+DATE_FORMAT = "%Y%m%d"
+DATE_SUFFIX = re.compile(r"_\d{8}(_\d+)?$")  # 檔名結尾的日期與流水號
 
 # 預設帶入的檔名
 DEFAULT_RULE = "規則檔.xlsx"
@@ -46,7 +47,7 @@ class PalletResult:
     rows: pd.DataFrame  # 棧板明細
     item_count: int  # 合併後的品項數
     unmatched: list  # 找不到包材規則的物料
-    output_path: str  # 寫入的檔案路徑
+    output_path: str
 
     # 明細筆數
     @property
@@ -103,7 +104,7 @@ def initial_path(saved_path, default_name):
 def dated_path(template_path):
     folder, name = os.path.split(template_path)
     stem, ext = os.path.splitext(name)
-    stem = DATE_SUFFIX.sub("", stem)  # 去掉檔名裡舊的日期
+    stem = DATE_SUFFIX.sub("", stem)
     base = f"{stem}_{date.today().strftime(DATE_FORMAT)}"
 
     path = os.path.join(folder, f"{base}{ext}")
@@ -141,15 +142,75 @@ def read_excel_checked(path, columns, label, **kwargs):
     return df
 
 
-# 讀取條件規則
+# 檢查資料
+
+# 判斷是否為正整數
+def is_positive_int(value):
+    number = pd.to_numeric(value, errors="coerce")
+    return pd.notna(number) and number > 0 and float(number).is_integer()
+
+
+# 判斷儲存格是否空白
+def is_blank(value):
+    return pd.isna(value) or not str(value).strip()
+
+
+# 產生數值欄位的錯誤說明
+def number_problem(row, column, value):
+    if is_blank(value):
+        return f"第{row}列{column}空白"
+    number = pd.to_numeric(value, errors="coerce")
+    if pd.notna(number) and float(number).is_integer():
+        value = int(number)
+    return f"第{row}列{column}「{value}」不是正整數"
+
+
+# 有問題的列組成錯誤訊息
+def raise_problems(path, problems):
+    if not problems:
+        return
+    text = "；".join(problems[:MAX_PROBLEMS])
+    if len(problems) > MAX_PROBLEMS:
+        text += f" 等 {len(problems)} 處"
+    raise PalletError(f"{os.path.basename(path)} {text}")
+
+
+# 讀取並檢查條件規則
 def load_rules(path):
-    return read_excel_checked(path, RULE_COLUMNS, "條件規則")
+    df = read_excel_checked(path, RULE_COLUMNS, "條件規則",
+                            dtype={"包材": str})
+    df = df.dropna(how="all", subset=RULE_COLUMNS)
+
+    problems = []
+    for index, code, size in zip(df.index, df["包材"], df["分裝"]):
+        row = index + 2
+        if is_blank(code):
+            problems.append(f"第{row}列包材空白")
+        if not is_positive_int(size):
+            problems.append(number_problem(row, "分裝", size))
+    raise_problems(path, problems)
+
+    df["分裝"] = pd.to_numeric(df["分裝"]).astype(int)
+    return df
 
 
-# 讀取需要整合的資料
+# 讀取並檢查需要整合的資料
 def load_items(path):
-    return read_excel_checked(path, ITEM_COLUMNS, "需要整合",
-                              dtype={"批次": str})
+    df = read_excel_checked(path, ITEM_COLUMNS, "需要整合",
+                            dtype={"物料": str, "批次": str})
+    df = df.dropna(how="all", subset=ITEM_COLUMNS)
+
+    problems = []
+    for index, item_code, qty in zip(df.index, df["物料"], df["件數"]):
+        row = index + 2
+        if is_blank(item_code):
+            problems.append(f"第{row}列物料空白")
+        if not is_positive_int(qty):
+            problems.append(number_problem(row, "件數", qty))
+    raise_problems(path, problems)
+
+    df["件數"] = pd.to_numeric(df["件數"]).astype(int)
+    return df
 
 
 # 確認輸出檔可以開啟
@@ -178,8 +239,7 @@ def merge_items(df):
 # 找出物料對應的包材規則，查無回傳None
 def find_rule(rules_df, item_code):
     tail = item_code[-CODE_LENGTH:]
-    codes = rules_df["包材"].astype(str)
-    matched = rules_df[codes.apply(lambda code: code in tail)]
+    matched = rules_df[rules_df["包材"].apply(lambda code: code in tail)]
     if matched.empty:
         return None
     return matched.iloc[0]
@@ -191,21 +251,14 @@ def split_items(items_df, rules_df):
     unmatched = []
     rows = items_df[ITEM_COLUMNS].itertuples(index=False)
     for item_code, batch, qty in rows:
-        if not isinstance(item_code, str):
-            raise PalletError("物料欄位有空白或非文字，請檢查需要整合的檔案")
-
         rule = find_rule(rules_df, item_code)
         if rule is None:
-            result.append([item_code, batch, qty, "", UNMATCHED])  # 包材留空
+            result.append([item_code, batch, qty, "", UNMATCHED])
             if item_code not in unmatched:
                 unmatched.append(item_code)
             continue
 
-        try:
-            quotient = int(qty // rule["分裝"])
-            remainder = int(qty % rule["分裝"])
-        except (TypeError, ValueError, ZeroDivisionError):
-            raise PalletError(f"{item_code} 的件數或分裝有誤，請檢查件數欄位")
+        quotient, remainder = divmod(int(qty), int(rule["分裝"]))
 
         full_row = [item_code, batch, rule["分裝"], rule["包裝"], FULL]
         result.extend([full_row] * quotient)

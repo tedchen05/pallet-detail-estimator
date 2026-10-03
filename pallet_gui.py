@@ -28,7 +28,7 @@ ERROR = "#C0392B"
 CARD_BG = "#F3F7FC"
 CARD_BORDER = "#C9D8EC"
 
-# 明細預覽底色 {類型: (底色, 圖例說明)}
+# 明細預覽的底色與圖例
 ROW_COLORS = {
     REMAINDER: ("#D3E4FA", "未滿分裝 (餘數)"),
     UNMATCHED: ("#FFE8CC", "找不到包材規則，包材欄留空"),
@@ -38,6 +38,7 @@ EXCEL_TYPES = [("Excel 檔案", "*.xlsx")]
 PREVIEW_ROWS = 12  # 明細預覽顯示幾列
 PREVIEW_COLUMNS = ["序號"] + OUTPUT_COLUMNS
 COLUMN_WIDTHS = [50, 150, 100, 70, 90]  # 序號、品號、批號、數量、包材
+RESUME_DELAY = 300  # 估算完幾毫秒後才開放按鈕
 
 
 # 數量轉成整數文字
@@ -59,6 +60,7 @@ class PalletApp:
         self.root = root
         self.output_path = ""  # 上次寫入的檔案
         self.keep_name = tk.BooleanVar(value=False)  # 是否使用原檔名
+        self.busy = False
 
         root.title(APP_TITLE)
         root.resizable(False, False)
@@ -253,14 +255,17 @@ class PalletApp:
 
     # 執行估算並顯示結果
     def submit(self):
-        for key in self.steps:
-            if self.path_of(key):
-                self.set_file(key, self.path_of(key))  # 重新檢查檔案
-
+        if self.busy:
+            return
+        self.busy = True
         self.run_button.config(state=tk.DISABLED)
         self.root.config(cursor="watch")
         self.root.update_idletasks()
+
         try:
+            for key in self.steps:
+                if self.path_of(key):
+                    self.set_file(key, self.path_of(key))
             result = build_pallet(self.path_of("rule"), self.path_of("item"),
                                   self.path_of("output"), self.keep_name.get())
         except PalletError as error:
@@ -268,8 +273,13 @@ class PalletApp:
         else:
             self._show_result(result)
         finally:
-            self.run_button.config(state=tk.NORMAL)
-            self.root.config(cursor="")
+            self.root.after(RESUME_DELAY, self._resume)
+
+    # 估算結束後開放按鈕
+    def _resume(self):
+        self.busy = False
+        self.run_button.config(state=tk.NORMAL)
+        self.root.config(cursor="")
 
     # 顯示估算結果
     def _show_result(self, result):
